@@ -1,0 +1,13 @@
+llama-index
+pypdf
+python-docx
+beautifulsoup4
+langchain
+reportlab
+python-dotenv
+langchain_text_splitters
+PyMuPDF
+llama-index-readers-file
+unstructured
+unstructured-client
+unstructured[pdf]
