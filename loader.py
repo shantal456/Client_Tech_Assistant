@@ -1,79 +1,68 @@
 import os
 import re
 from typing import List
-from config import DATA_DIR, CHUNK_OVERLAP, CHUNK_SIZE
-from bs4 import BeautifulSoup
 import fitz
+from bs4 import BeautifulSoup
 
-# LlamaIndex imports
-from llama_index.core import SimpleDirectoryReader
-from llama_index.core.readers.base import BaseReader
+from config import DATA_DIR, CHUNK_OVERLAP, CHUNK_SIZE
+
+# Используем только структуры LlamaIndex
 from llama_index.core.schema import Document as LlamaIndexDocument
-from llama_index.readers.file import UnstructuredReader
+from llama_index.core.node_parser import SentenceSplitter
 
-# Langchain imports
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.documents import Document as LangchainDocument
 
-   
-def clean_document_content(text: str) -> str:
-    """
-    Очищает текст документа от специфических артефактов MHTML (quoted-printable, HTML/CSS/JS),
-    метаданных PDF, бинарных данных, случайных символов и избыточных пробелов.
-    """
-    # 1. Удаление HTML/CSS/JavaScript с помощью BeautifulSoup
+def clean_html_content(html_text: str) -> str:
+    """Удаляет HTML-теги, скрипты и стили только для HTML-документов."""
     try:
-        soup = BeautifulSoup(text, 'html.parser')
-        # Удаляем теги <script> и <style>
+        soup = BeautifulSoup(html_text, 'html.parser')
         for script_or_style in soup(['script', 'style']):
             script_or_style.decompose()
-        # Извлекаем чистый текст, удаляя лишние пробелы, создаваемые BeautifulSoup
-        text = soup.get_text(separator=' ', strip=True)
+        return soup.get_text(separator=' ', strip=True)
     except Exception:
-        # Если парсинг HTML не удался, продолжаем с текстом как есть
-        pass
-       
-    # 2. Удаление последовательностей нетекстовых символов и общей "мусорной" пунктуации
+        return html_text
+
+
+def clean_text_spacing(text: str) -> str:
+    """Очищает текст от мусорных символов и нормализует пробелы."""
+    # Удаление последовательностей нетекстовых символов
     text = re.sub(r'[^a-zA-Zа-яА-Я0-9\s.,!?;:\'"\-\(\)\[\]{}\/\\]{5,}', ' ', text)
-    # Удаление неразрывных пробелов и других юникодных пробелов
+    # Удаление неразрывных пробелов
     text = re.sub(r'[\ufeff\u200b\xa0]+', ' ', text)
-
-    # 3. Нормализация пробелов и удаление изолированных символов
-    text = re.sub(r'\s+', ' ', text).strip() # Заменяем множественные пробелы на один и обрезаем по краям
-    # Удаление одиночных неалфавитно-цифровых символов, окруженных пробелами (например, " - ", " $ ")
+    # Нормализация пробелов
+    text = re.sub(r'\s+', ' ', text).strip()
+    # Удаление одиночных изолированных знаков пунктуации
     text = re.sub(r'(?<=\s)[^a-zA-Zа-яА-Я0-9\s](?=\s)', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip() # Финальная нормализация пробелов
-
-    return text
+    return re.sub(r'\s+', ' ', text).strip()
 
 
-def load_documents_llama_index_and_enrich_metadata(data_dir: str) -> List[LangchainDocument]:
-    """
-    Загрузка документов. Извлекает текст постранично 
-    с сохранением номеров страниц и имен файлов.
-    """
+def load_and_clean_documents(data_dir: str) -> List[LlamaIndexDocument]:
+    """Загрузка документов в формате LlamaIndex с сохранением метаданных."""
     print(f"\nНачинаем загрузку и обработку документов из директории: {data_dir}")
-    all_langchain_documents: List[LangchainDocument] = []
+    llama_documents: List[LlamaIndexDocument] = []
+
+    if not os.path.exists(data_dir):
+        print(f"❌ Директория {data_dir} не найдена!")
+        return llama_documents
 
     for file_name in os.listdir(data_dir):
         file_path = os.path.join(data_dir, file_name)
         if not os.path.isfile(file_path):
             continue
 
-        # Обработка PDF через PyMuPDF
+        # --- ОБРАБОТКА PDF ---
         if file_name.endswith('.pdf'):
             try:
                 doc = fitz.open(file_path)
                 for page_num, page in enumerate(doc, start=1):
                     text = page.get_text()
-                    cleaned_text = clean_document_content(text)
+                    cleaned_text = clean_text_spacing(text)
                     
                     if not cleaned_text:
                         continue
                         
-                    all_langchain_documents.append(
-                        LangchainDocument(
-                            page_content=cleaned_text,
+                    llama_documents.append(
+                        LlamaIndexDocument(
+                            text=cleaned_text,
                             metadata={
                                 "source": file_name,
                                 "page": page_num,
@@ -84,19 +73,21 @@ def load_documents_llama_index_and_enrich_metadata(data_dir: str) -> List[Langch
             except Exception as e:
                 print(f"Ошибка чтения PDF {file_name}: {e}")
 
-        # Обработка HTML (страница всегда None)
+        # --- ОБРАБОТКА HTML ---
         elif file_name.endswith('.html') or file_name.endswith('.htm'):
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
-                    text = f.read()
-                    cleaned_text = clean_document_content(text)
+                    html_content = f.read()
+                    text_from_html = clean_html_content(html_content)
+                    cleaned_text = clean_text_spacing(text_from_html)
+                    
                     if cleaned_text:
-                        all_langchain_documents.append(
-                            LangchainDocument(
-                                page_content=cleaned_text,
+                        llama_documents.append(
+                            LlamaIndexDocument(
+                                text=cleaned_text,
                                 metadata={
                                     "source": file_name,
-                                    "page": None,
+                                    "page": 1,
                                     "header": os.path.splitext(file_name)[0]
                                 }
                             )
@@ -104,56 +95,66 @@ def load_documents_llama_index_and_enrich_metadata(data_dir: str) -> List[Langch
             except Exception as e:
                 print(f"Ошибка чтения HTML {file_name}: {e}")
 
-    print(f"\nЗагружено частей: {len(all_langchain_documents)}. Они готовы к чанкингу.")
-    return all_langchain_documents
+        # --- ДОБАВЛЕНО: ОБРАБОТКА TXT ---
+        elif file_name.endswith('.txt'):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    text_content = f.read()
+                    cleaned_text = clean_text_spacing(text_content)
+                    
+                    if cleaned_text:
+                        llama_documents.append(
+                            LlamaIndexDocument(
+                                text=cleaned_text,
+                                metadata={
+                                    "source": file_name,
+                                    "page": 1,  # У текстового файла одна страница
+                                    "header": os.path.splitext(file_name)[0]
+                                }
+                            )
+                        )
+            except Exception as e:
+                print(f"Ошибка чтения TXT {file_name}: {e}")
 
-# разбиваем текст на чанки с сохранением метаданных
-def chunk_documents(
-    documents: List[LangchainDocument], 
+    print(f"\nЗагружено частей документов: {len(llama_documents)}.")
+    return llama_documents
+
+
+def chunk_llama_documents(
+    documents: List[LlamaIndexDocument], 
     chunk_size: int = CHUNK_SIZE, 
     chunk_overlap: int = CHUNK_OVERLAP
-) -> List[LangchainDocument]:
-    """
-    Разбивает список Langchain Document на более мелкие чанки,
-    автоматически передавая оригинальные метаданные каждому новому чанку.
-    """
-    text_splitter = RecursiveCharacterTextSplitter(
+) -> List[LlamaIndexDocument]:
+    """Разбивает документы LlamaIndex на чанки с помощью SentenceSplitter."""
+    # SentenceSplitter в LlamaIndex умный: он делит по абзацам, предложениям и словам,
+    # не разрывая смысловые куски и автоматически наследуя метаданные.
+    splitter = SentenceSplitter(
         chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=[
-            "\n(?=\s*\d+(?:\.\d+)*(?:[.)])?\s+)", #подпункты
-            "\n\n",                   # Абзацы между частями
-            ".\s{2,}",                # После предложений
-            "\n",                     # Переносы строк
-            " ",                      # Пробел
-            ""                        # Символы
-        ],
-        is_separator_regex=True,
-        keep_separator=True
+        chunk_overlap=chunk_overlap
     )
     
-    chunks = text_splitter.split_documents(documents)
+    # get_nodes_from_documents возвращает BaseNode (наследники Document) с метаданными
+    nodes = splitter.get_nodes_from_documents(documents)
     
-    return chunks
+    # Приводим к типу LlamaIndexDocument для единообразия (BaseNode полностью совместим)
+    return nodes
 
-# --- Основное выполнение скрипта ---
+
 if __name__ == "__main__":
+    # Для тестов, если config.py еще не обновлен
+    # DATA_DIR = "data" ; CHUNK_SIZE = 500 ; CHUNK_OVERLAP = 50
 
-    # Шаг 1: Загружаем и парсим документы с LlamaIndex, очищаем и обогащаем метаданные
-    print("Загрузка, очистка и парсинг документов")
-    initial_documents = load_documents_llama_index_and_enrich_metadata(DATA_DIR)
+    print("--- Шаг 1: Загрузка и очистка документов ---")
+    initial_docs = load_and_clean_documents(DATA_DIR)
     
-    # Шаг 2: Разбиваем извлеченные документы на чанки с Langchain
-    print("\nРазбиение очищенных документов на чанки с использованием Langchain RecursiveCharacterTextSplitter...")
-    final_chunks = chunk_documents(initial_documents, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+    print("\n--- Шаг 2: Чанкинг документов через LlamaIndex ---")
+    final_chunks = chunk_llama_documents(initial_docs, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
     print(f"Создано {len(final_chunks)} финальных текстовых чанков.")
 
-    # --- Проверка: выводим первые несколько чанков для верификации ---
     print("\n--- Проверка: Примеры чанков с метаданными ---")
-
-    for i, chunk in enumerate(final_chunks[:7]):
+    for i, chunk in enumerate(final_chunks[:3]):
         print(f"\n--- Чанк {i + 1} ---")
-
-        content_preview = chunk.page_content[:200].replace("\n", " ")
-        print(f"Контент (первые 200 символов): {content_preview}...")
+        # В LlamaIndex текст хранится в атрибуте .text (вместо .page_content в LangChain)
+        content_preview = chunk.text[:150].replace("\n", " ")
+        print(f"Контент: {content_preview}...")
         print(f"Метаданные: {chunk.metadata}")

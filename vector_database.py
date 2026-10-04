@@ -1,180 +1,176 @@
 from typing import List, Any, Dict
+import torch
 
 # Qdrant
-from qdrant_client import QdrantClient
-try:
-    from qdrant_client.models import VectorParams, Distance
-except Exception:
-    # fallback for older/newer package layouts
-    from qdrant_client.http.models import VectorParams, Distance  # type: ignore
+from qdrant_client import QdrantClient, AsyncQdrantClient
+from qdrant_client.models import VectorParams, Distance
 
-# LlamaIndex
+# LlamaIndex Core
 from llama_index.core import StorageContext, VectorStoreIndex, Settings, PromptTemplate
 from llama_index.core.query_engine import RetrieverQueryEngine
-from llama_index.core import Document as LlamaDocument
+from llama_index.core.response_synthesizers import ResponseMode, get_response_synthesizer
+from llama_index.core.schema import BaseNode
+
+# LlamaIndex Plugins
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.qdrant import QdrantVectorStore
-from llama_index.core.response_synthesizers import ResponseMode, get_response_synthesizer
-from llama_index.llms.ollama import Ollama
-from llama_index.postprocessor.flashrank_rerank import FlashRankRerank
+from llama_index.llms.openai_like import OpenAILike
+from llama_index.core.postprocessor import LLMRerank
 
-from loader import (
-     load_documents_llama_index_and_enrich_metadata,
-     chunk_documents
+from llama_index.postprocessor.sbert_rerank import SentenceTransformerRerank
+
+# Конфигурация (исправлено под vLLM)
+from config import (
+    QDRANT_URL, EMBEDDING_MODEL, COLLECTION_NAME, 
+    TOP_K, TOP_N, QA_TEMPLATE, VLLM_MODEL_NAME, VLLM_URL
 )
-from config import QDRANT_URL, EMBEDDING_MODEL,COLLECTION_NAME,TOP_K,TOP_N, QA_TEMPLATE, OLLAMA_MODEL_NAME, OLLAMA_URL, LLM_REQUEST_TIMEOUT
 
-DEVICE = "cuda" if (lambda: __import__("torch").cuda.is_available())() else "cpu"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 
 def create_qdrant_client(url: str = QDRANT_URL) -> QdrantClient:
     return QdrantClient(url=url)
 
+
 def get_existing_index_from_qdrant(qdrant_client: QdrantClient, collection_name: str) -> VectorStoreIndex:
-    """
-    Инициализирует VectorStoreIndex из уже существующей коллекции Qdrant 
-    БЕЗ повторной векторизации и загрузки документов.
-    """
-    # Создаем векторное хранилище, привязанное к существующей коллекции
-    vector_store = QdrantVectorStore(client=qdrant_client, collection_name=collection_name, prefer_grpc=False)
+    """Инициализирует VectorStoreIndex из уже существующей коллекции Qdrant с поддержкой асинхронности."""
     
-    # Передаем его в контекст хранилища
+    async_qdrant_client = AsyncQdrantClient(url=QDRANT_URL)
+    
+    vector_store = QdrantVectorStore(
+        client=qdrant_client, 
+        aclient=async_qdrant_client,  # <-- Передаем асинхронный клиент сюда
+        collection_name=collection_name, 
+        prefer_grpc=False
+    )
+    
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
-    
-    # Восстанавливаем индекс из существующего контекста (документы передавать не нужно)
-    index = VectorStoreIndex.from_vector_store(vector_store=vector_store, storage_context=storage_context)
-    return index
+    return VectorStoreIndex.from_vector_store(vector_store=vector_store, storage_context=storage_context)
 
 def ensure_qdrant_collection(
     client: QdrantClient, collection_name: str, vector_size: int, distance: Distance = Distance.COSINE
 ) -> None:
-    # Создаёт коллекцию, если она не существует
+    """Создаёт коллекцию в Qdrant, если её не существует."""
     try:
-        # get_collection вернёт словарь/объект если существует
         client.get_collection(collection_name)
-        # существует -> ничего не делаем
         return
     except Exception:
         pass
 
-    # Создаём коллекцию
     try:
         client.create_collection(
             collection_name=collection_name,
             vectors_config=VectorParams(size=vector_size, distance=distance),
         )
-        print(f"Создана коллекция Qdrant '{collection_name}' (size={vector_size}, distance={distance}).")
-    except TypeError:
-        # В некоторых версиях API сигнатура может отличаться
-        try:
-            client.create_collection(
-                collection_name=collection_name,
-                vector_size=vector_size,
-                distance=distance,
-            )
-            print(f"Создана коллекция Qdrant '{collection_name}' (size={vector_size}, distance={distance}).")
-        except Exception as exc:
-            print(f"Не удалось явно создать коллекцию: {exc}. Коллекция может быть создана автоматически при вставке.")
+        print(f"✅ Создана коллекция Qdrant '{collection_name}' (size={vector_size}).")
+    except Exception as exc:
+        print(f"⚠️ Ошибка создания коллекции: {exc}. База попробует создать её автоматически.")
+
 
 def build_index_to_qdrant(
-    final_chunks: List[Any],
+    nodes: List[BaseNode],
     qdrant_client: QdrantClient,
     collection_name: str = COLLECTION_NAME,
     embedding_model_name: str = EMBEDDING_MODEL,
     device: str = DEVICE,
 ) -> VectorStoreIndex:
     """
-    Индексирует final_chunks в Qdrant через llama_index, сохраняя метаданные.
-    final_chunks: список объектов с .page_content (str) и .metadata (dict).
-    Возвращает созданный VectorStoreIndex.
+    Принимает готовые ноды (чанки) из loader.py, вычисляет эмбеддинги
+    и сохраняет их в Qdrant БЕЗ повторного чанкинга.
     """
-    if not final_chunks:
-        raise ValueError("final_chunks пустой список")
+    if not nodes:
+        raise ValueError("Список нод (nodes) пуст.")
 
-    # 1 Создаём эмбеддер
+    # 1. Инициализация локального эмбеддера
     embed_model = HuggingFaceEmbedding(model_name=embedding_model_name, device=device, normalize=True)
+    Settings.embed_model = embed_model
 
-    # 2 Конвертируем чанки в LlamaIndex Document'ы
-    llama_docs: List[LlamaDocument] = []
-    sample_texts: List[str] = []
-    for i, chunk in enumerate(final_chunks):
-        text = getattr(chunk, "page_content", None)
-        if text is None:
-            text = str(chunk)
-        metadata = getattr(chunk, "metadata", None) or {}
-        doc_id = f"{metadata.get('source', 'doc')}_chunk_{i}"
+    # 2. Настройка глобального LLM под vLLM
+    Settings.llm = OpenAILike(
+        model=VLLM_MODEL_NAME,
+        api_base=VLLM_URL,
+        api_key="fake-key",
+        is_chat_model=True,
+        temperature=0.1,
+        max_tokens=1024
+    )
 
-        doc = LlamaDocument(text=text, metadata=metadata, id_=doc_id)
-        #Настройка формата метаданных для этого документа
-        doc.metadata_template = "{key}: {value}"
-        doc.metadata_separator = ", стр. "
-        doc.excluded_llm_metadata_keys = ["header"] 
-        llama_docs.append(doc)
+    # 3. Настройка метаданных для каждой ноды
+    sample_texts = []
+    for i, node in enumerate(nodes):
+        node.metadata_template = "{key}: {value}"
+        node.metadata_separator = ", "
+        # Исключаем header из отправки в LLM, оставляем для поиска
+        node.excluded_llm_metadata_keys = ["header"]
+        
         if len(sample_texts) < 4:
-            sample_texts.append(text)
+            sample_texts.append(node.get_content(metadata_mode="none"))
 
-    # 3 Оценка размера вектора (vector_size) на основе sample_embeddings
+    # 4. Определение размерности вектора
     try:
         sample_embeddings = embed_model.get_text_embedding_batch(sample_texts)
+        vector_size = len(sample_embeddings[0])
     except Exception as exc:
-        raise RuntimeError("Ошибка при вычислении эмбеддингов для sample_texts: " + str(exc))
-    if not sample_embeddings or not isinstance(sample_embeddings[0], (list, tuple)):
-        raise RuntimeError("Не удалось получить корректные эмбеддинги для определения vector_size.")
-    vector_size = len(sample_embeddings[0])
+        raise RuntimeError(f"Ошибка вычисления тестового эмбеддинга: {exc}")
 
-    # 4 Создаём/проверяем коллекцию в Qdrant
+    # 5. Проверка коллекции
     ensure_qdrant_collection(qdrant_client, collection_name, vector_size, Distance.COSINE)
-    Settings.embed_model = embed_model
-    Settings.llm = Ollama(
-    model=OLLAMA_MODEL_NAME, 
-    base_url=OLLAMA_URL,
-    request_timeout=LLM_REQUEST_TIMEOUT,
-    temperature=0.1,
-    context_window=4096
-    )
 
-    # 5 Создаём QdrantVectorStore и StorageContext для llama_index
-    vector_store = QdrantVectorStore(client=qdrant_client, collection_name=collection_name, prefer_grpc=False)
+    # 6. Создание хранилища и запись готовых NODES
+    async_qdrant_client = AsyncQdrantClient(url=QDRANT_URL)
+
+    vector_store = QdrantVectorStore(
+        client=qdrant_client, 
+        aclient=async_qdrant_client,
+        collection_name=collection_name, 
+        prefer_grpc=False
+    )
     storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
-    # 6 Создаём индекс
-    index = VectorStoreIndex.from_documents(
-        documents=llama_docs, 
-        storage_context=storage_context
-    )
+    print(f"⏳ Запись {len(nodes)} чанков в Qdrant...")
+    index = VectorStoreIndex(nodes=nodes, storage_context=storage_context)
+    print("✅ Индексация успешно завершена!")
     return index
 
+
 def make_retriever(index: VectorStoreIndex, top_k: int = TOP_K) -> RetrieverQueryEngine:
+    """Собирает QueryEngine с поддержкой семантического поиска Qdrant и родного SBERT BGE Reranker."""
+    
+    # Настраиваем компактный синтезатор ответов
     response_synthesizer = get_response_synthesizer(
-        response_mode=ResponseMode.SIMPLE_SUMMARIZE
+        response_mode=ResponseMode.COMPACT
     )    
-    # Инициализация FlashRank
-    reranker = FlashRankRerank(
-        top_n=TOP_N,  # сколько лучших чанков пропустить в LLM после переранжирования
-        model="ms-marco-MultiBERT-L-12"
+    
+    # Инициализируем нативный LlamaIndex реранкер на базе sentence-transformers
+    reranker = SentenceTransformerRerank(
+        model="BAAI/bge-reranker-base",
+        top_n=TOP_N,
+        device=DEVICE
     )
     
-    # Qdrant достает top_k * 3 чанков
+    # Из Qdrant достаем в 3 раза больше документов (top_k * 3) для последующего реранкинга
     retriever = index.as_retriever(similarity_top_k=top_k * 3)
     
-    # Собираем query_engine с постобработкой
+    # Собираем query_engine с официальным нод-постпроцессором LlamaIndex
     query_engine = RetrieverQueryEngine(
         retriever=retriever,
         response_synthesizer=response_synthesizer,
         node_postprocessors=[reranker]
     )
     
+    # Применяем системный промпт техподдержки
     query_engine.update_prompts({"response_synthesizer:text_qa_template": PromptTemplate(QA_TEMPLATE)})
     
     return query_engine
 
 
 def print_retrieved_nodes(nodes: List[Any]) -> None:
+    """Вспомогательная функция для отладки выданных документов."""
     for i, node in enumerate(nodes):
         source_node = getattr(node, "node", node)
         text = source_node.get_content(metadata_mode="none").replace("\n", " ")
         meta: Dict[str, Any] = source_node.metadata or {}
         score = getattr(node, "score", None)
         score_text = f"{score:.4f}" if isinstance(score, float) else "n/a"
-        print(f"Контекст {i} score={score_text} id={meta.get('id') or meta.get('source')}")
-        print(f"    metadata={meta}")
-        print(f"    preview={text[:400]}...\n")
+        print(f"🔹 Контекст {i} | score={score_text} | source={meta.get('source')}")
+        print(f"    preview={text[:200]}...\n")

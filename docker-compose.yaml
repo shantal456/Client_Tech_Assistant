@@ -1,8 +1,8 @@
-name: corporate-assistant
+name: client-assistant
 
 services:
   qdrant:
-    image: qdrant/qdrant:v1.16.2
+    image: qdrant/qdrant:latest
     container_name: rag_qdrant
     ports:
       - "6333:6333"
@@ -12,6 +12,93 @@ services:
     environment:
       - QDRANT__SERVICE__GRPC_PORT=6334
     restart: always
+    # ДОБАВЛЕНО: Проверка здоровья Qdrant
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+
+  vllm:
+    image: vllm/vllm-openai:v0.6.1.post1
+    container_name: vllm
+    ports:
+      - "8080:8000"
+    volumes:
+      - E:/huggingface_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: always
+    command: >
+      --model Qwen/Qwen2.5-7B-Instruct-AWQ
+      --port 8000
+      --max-model-len 2048
+      --gpu-memory-utilization 0.95
+      --enforce-eager
+      --download-dir /root/.cache/huggingface
+    # ДОБАВЛЕНО: Умная проверка здоровья для vLLM (ожидает доступность API моделей)
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: langfuse
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres_secure_pass@langfuse_db:5432/langfuse
+      - NEXTAUTH_SECRET=super_secret_nextauth_string_minimum_32_chars
+      - NEXTAUTH_URL=http://localhost:3000
+      - SALT=super_secret_salt_string_for_encryption_purposes
+      - TELEMETRY_ENABLED=false
+    restart: always
+    depends_on:
+      langfuse_db:
+        condition: service_healthy
+
+  langfuse_db:
+    image: postgres:16-alpine
+    container_name: langfuse_db
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres_secure_pass
+      - POSTGRES_DB=langfuse
+    volumes:
+      - langfuse_db_data:/var/lib/postgresql/data
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+  
+  tg-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram_bot_rag
+    restart: always
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
+      - LANGFUSE_HOST=http://langfuse:3000
+      - QDRANT_URL=http://qdrant:6333
+      - VLLM_URL=http://vllm:8000/v1
+    volumes:
+      - E:/huggingface_cache:/root/.cache/huggingface
+    depends_on:
+      vllm:
+        condition: service_healthy
 
 volumes:
   qdrant_storage:
+  langfuse_db_data:
