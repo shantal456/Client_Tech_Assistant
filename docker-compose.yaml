@@ -36,9 +36,8 @@ services:
       --gpu-memory-utilization 0.95
       --enforce-eager
       --download-dir /root/.cache/huggingface
-    # Универсальная системная проверка порта силами самого ядра Linux
     healthcheck:
-      test: ["CMD-SHELL", "cat /dev/null > /dev/tcp/127.0.0.1/8000 || exit 1"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
       timeout: 5s
       retries: 90

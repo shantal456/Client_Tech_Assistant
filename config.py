@@ -10,7 +10,7 @@ OUTPUT_DATA_DIR="output_data"
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 100
 
-VLLM_URL = "http://vllm:8080/v1"
+VLLM_URL = "http://vllm:8000/v1"
 VLLM_MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct-AWQ"
 # Параметры поиска
 TOP_K = 5
