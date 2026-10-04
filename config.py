@@ -10,7 +10,7 @@ OUTPUT_DATA_DIR="output_data"
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 100
 
-VLLM_URL = "http://localhost:8080/v1"
+VLLM_URL = "http://vllm:8080/v1"
 VLLM_MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct-AWQ"
 # Параметры поиска
 TOP_K = 5
@@ -19,9 +19,9 @@ TOP_N = 3  # Сколько документов отдавать в LLM пос�
 
 EXPECTED_QDRANT_VERSION = "1.16.2"
 
-QDRANT_URL = "http://localhost:6333"
+QDRANT_URL = "http://rag_qdrant:6333"
 QDRANT_SERVER_VERSION = "1.16.2"
-COLLECTION_NAME = "docs_llamaindex_2"
+COLLECTION_NAME = "docs_llamaindex"
 EMBEDDING_MODEL = "cointegrated/rubert-tiny2"
 LLM_REQUEST_TIMEOUT = 600.0
 

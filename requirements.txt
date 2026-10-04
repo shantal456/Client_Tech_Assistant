@@ -21,7 +21,7 @@ python-docx
 pymupdf
 beautifulsoup4
 
-# 5. Нейросетевой бэкенд и база данных
+# 5. Нейросетевой бэкенд и база данных 
 torch --index-url https://pytorch.org
 sentence-transformers
 qdrant-client>=1.12.0

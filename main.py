@@ -81,7 +81,7 @@ if __name__ == "__main__":
         )
         print("✅ Индексация завершена. Данные успешно сохранены в Qdrant.")
 
-    print("\n👉 Шаг 4: Создаём retriever (Гибридный поиск + Rerank)")
+    print("\n👉 Шаг 4: Создаём retriever (Гибридный поиск + FlashRank Rerank)")
     query_engine = make_retriever(index, top_k=TOP_K)
 
     print("\n=======================================================")
@@ -126,3 +126,4 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"\n❌ Произошла ошибка при обработке запроса: {e}")
             print("Пожалуйста, проверьте логи контейнеров Qdrant и vLLM.")
+

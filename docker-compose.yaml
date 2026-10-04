@@ -12,12 +12,7 @@ services:
     environment:
       - QDRANT__SERVICE__GRPC_PORT=6334
     restart: always
-    # ДОБАВЛЕНО: Проверка здоровья Qdrant
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
-      interval: 5s
-      timeout: 5s
-      retries: 3
+    # Хелсчек убран, так как Qdrant готов к работе сразу после старта
 
   vllm:
     image: vllm/vllm-openai:v0.6.1.post1
@@ -41,12 +36,34 @@ services:
       --gpu-memory-utilization 0.95
       --enforce-eager
       --download-dir /root/.cache/huggingface
-    # ДОБАВЛЕНО: Умная проверка здоровья для vLLM (ожидает доступность API моделей)
+    # Универсальная системная проверка порта силами самого ядра Linux
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8000 || exit 1"]
+      test: ["CMD-SHELL", "cat /dev/null > /dev/tcp/127.0.0.1/8000 || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 30
+      retries: 90
+
+  tg-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram_bot_rag
+    restart: always
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
+      - LANGFUSE_HOST=http://langfuse:3000
+      - QDRANT_URL=http://rag_qdrant:6333
+      - VLLM_URL=http://vllm:8000/v1
+    volumes:
+      - E:/huggingface_cache:/root/.cache/huggingface
+    depends_on:
+      qdrant:
+        condition: service_started  # Просто ждем запуск процесса
+      vllm:
+        condition: service_healthy  # Ждем пока vLLM прогреет GPU
+
 
   langfuse:
     image: langfuse/langfuse:2
@@ -79,25 +96,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-  
-  tg-bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: telegram_bot_rag
-    restart: always
-    environment:
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
-      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
-      - LANGFUSE_HOST=http://langfuse:3000
-      - QDRANT_URL=http://qdrant:6333
-      - VLLM_URL=http://vllm:8000/v1
-    volumes:
-      - E:/huggingface_cache:/root/.cache/huggingface
-    depends_on:
-      vllm:
-        condition: service_healthy
 
 volumes:
   qdrant_storage:

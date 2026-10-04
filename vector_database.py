@@ -133,6 +133,7 @@ def build_index_to_qdrant(
     return index
 
 
+
 def make_retriever(index: VectorStoreIndex, top_k: int = TOP_K) -> RetrieverQueryEngine:
     """Собирает QueryEngine с поддержкой семантического поиска Qdrant и родного SBERT BGE Reranker."""
     

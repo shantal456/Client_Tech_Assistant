@@ -158,3 +158,4 @@ if __name__ == "__main__":
         content_preview = chunk.text[:150].replace("\n", " ")
         print(f"Контент: {content_preview}...")
         print(f"Метаданные: {chunk.metadata}")
+        
